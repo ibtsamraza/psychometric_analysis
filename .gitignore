@@ -1,0 +1,8 @@
+.qodo
+- # Node modules & build
+- frontend/node_modules/
+- frontend/build/
++ # Node modules & build for our frontend folder
++ psychometric-frontend/node_modules/
++ psychometric-frontend/build/
+

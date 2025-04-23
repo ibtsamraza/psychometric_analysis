@@ -1,0 +1,8 @@
+langchain_groq
+langchain
+langchain_together
+dotenv
+langchain_huggingface
+pandas
+langgraph
+python-multipart
