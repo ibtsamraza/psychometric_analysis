@@ -1,6 +1,17 @@
 import pandas as pd                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
 from collections import defaultdict
 import re
+import time
+from session_manager import update_session_status, session_status
+
+async def update_progress(session_id: str, step: str, message: str, pct: int, name: str = ""):
+    """Only send an update if pct changed or >2s since last send."""
+    info = session_status.get(session_id, {})
+    last_ts, last_pct = info.get("timestamp", 0), info.get("progress", 0)
+    now = time.time()
+    if pct != last_pct or (now - last_ts) > 2:
+        await update_session_status(session_id, step, message, pct, name)
+
 
 
 
@@ -54,10 +65,6 @@ items_list = [
     "Traffic annoys me (R)",
     "Easy to handle unforeseen situations"
 ]
-
-
-
-
 
 correlated_domains = {
     "Ability to work with others": ["Openness to individuality"],
@@ -113,7 +120,19 @@ def extract_score(file_path):
     # Process each sheet
     for sheet_name in excel_file.sheet_names:
         # Load the sheet (skip initial header rows to access actual data)
-        df = pd.read_excel(file_path, sheet_name=sheet_name, skiprows=3)
+        df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+        header_row = None
+
+        for i in range(len(df_raw)):
+            row = df_raw.iloc[i]
+            row_values = [str(val).lower() for val in row if pd.notna(val)]
+            if(len(row_values) == 6):
+                header_row = i
+                break
+            if header_row is None:
+                continue
+
+        df = pd.read_excel(file_path, sheet_name=sheet_name, skiprows=header_row)
         
         # Skip if sheet is empty or doesn't have required columns
         # if df.empty or not all(col in df.columns for col in ['Domain', 'Subdomain', 'Subdomain Total', 'Subdomain Obtained']):
@@ -187,11 +206,26 @@ def extract_items(file_path):
     # Process each sheet
     for sheet_name in excel_file.sheet_names:
         # Load the sheet (skip initial header rows to access actual data)
-        df = pd.read_excel(file_path, sheet_name=sheet_name, skiprows=1)
+        df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+        header_row = None
+
+        for i in range(len(df_raw)):
+
+            row = df_raw.iloc[i]
+            row_values = [str(val).lower() for val in row if pd.notna(val)]
+
+            if(len(row_values) == 7):
+                header_row = i
+                break
+            if header_row is None:
+                continue
+
+        df = pd.read_excel(file_path, sheet_name=sheet_name, skiprows=header_row)
         
         # Skip if sheet is empty or doesn't have required columns
         # if df.empty or not all(col in df.columns for col in ["Sub-Domain", "Question Value Name"]):
         #     continue
+        df.columns = ["S No", "Item No", "Question", "Domain", "Sub-Domain", "Question Value Name", "Question Value"]
             
         sub_domain_column = df["Sub-Domain"].tolist()
         question_selected = df["Question Value Name"].tolist()

@@ -2,7 +2,7 @@ langchain_groq
 langchain
 langchain_together
 dotenv
-langchain_huggingface
+fastapi uvicorn[standard]
 pandas
 langgraph
 python-multipart

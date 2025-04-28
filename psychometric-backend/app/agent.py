@@ -1,3 +1,4 @@
+
 from llm_models import (
     gemma,
     groq_llama,
@@ -10,220 +11,160 @@ from llm_models import (
 from prompt_templates import (
     psychometric_analysis_prompt,
     missing_strengths_and_weakness_prompt,
-    conflicted_item_prompt,
     corelated_domain_together_prompt,
     item_analysis_2_prompt,
     judge_llm_prompt,
     format_text_prompt
 )
-from utils import items_list, correlated_domains
+
+from session_manager import update_session_status, session_status
+from utils import update_progress, correlated_domains
 from schemas import ThinkTagParser, missing_domain_parser, MissingDomain
-from typing import TypedDict, Annotated, Sequence, Dict, List, Any
-from langgraph.graph import Graph, StateGraph, END
-from langgraph.prebuilt import ToolNode
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate
+from typing import TypedDict, Dict, List, Any
+from langgraph.graph import StateGraph, END
 from langchain_core.output_parsers import StrOutputParser
+import asyncio
 
-
-# psychometric_analysis_chain = psychometric_analysis_prompt | llama_70b_together_free
-# missing_strengths_and_weakness_chain = missing_strengths_and_weakness_prompt | groq_r1_llama | missing_domain_parser
-
-# corelated_domain_together_chain = corelated_domain_together_prompt | groq_r1_llama | ThinkTagParser()
-# item_analysis_chain = item_analysis_prompt | groq_r1_llama | ThinkTagParser()
-# conflicted_item_chain = conflicted_item_prompt | groq_r1_llama | ThinkTagParser()
-
-def check_missing_count(missing_domain: MissingDomain) -> bool:
-    """
-    Check if either missing_strengths or missing_weaknesses has more than 4 elements
-    
-    Args:
-        missing_domain: MissingDomain object containing lists of missing items
-        
-    Returns:
-        bool: True if either list has more than 4 elements, False otherwise
-    """
-    return (
-        len(missing_domain.missing_strengths) > 4 or 
-        len(missing_domain.missing_weaknesses) > 4
-    )
-
-# Define the state
+# TypedDict for shared state
 class AnalysisState(TypedDict):
-    scores: Dict[str, List[Dict[str, Any]]]  # Strengths and development areas
-    items: Dict[str, List[List[str]]]  # Item responses
-    metadata: Dict[str, bool]  # Response bias and social desirability flags
-    analysis: str  # Psychometric analysis
+    scores: Dict[str, List[Dict[str, Any]]]
+    items: Dict[str, List[List[str]]]
+    metadata: Dict[str, bool]
+    analysis: str
     missing_count: int
     final_output: str
-    item_analysis: str  # Add item analysis field
+    item_analysis: str
+    name: str
+# Global session tracker
+current_session_id: str | None = None
 
-
-# Define the nodes
-def psychometric_analysis(state: AnalysisState) -> AnalysisState:
-    """First analysis by psychometric analysis agent"""
-
-    chain = psychometric_analysis_prompt | llama_70b_together_free | StrOutputParser()   
-    analysis = chain.invoke({"strength": state["scores"]["strength"], "development_area": state["scores"]["development_area"]})
-    print("psychometric_analysis_agent")
+# Agent implementations
+async def psychometric_analysis(state: AnalysisState, session_id: str) -> AnalysisState:
+    await update_progress(session_id, "psychometric_analysis", "Running psychometric analysis…", 10, state["name"])
+    chain = psychometric_analysis_prompt | llama_70b_together_free | StrOutputParser()
+    analysis = chain.invoke({
+        "strength": state["scores"]["strength"],
+        "development_area": state["scores"]["development_area"]
+    })
     return {"analysis": analysis}
 
-
-
-def check_missing_analysis(state: AnalysisState) -> AnalysisState:
-    """Check for missing strengths and weaknesses"""
+async def check_missing_analysis(state: AnalysisState, session_id: str) -> AnalysisState:
+    await update_progress(session_id, "check_missing", "Checking for missing strengths/weaknesses…", 35, state["name"])
     chain = missing_strengths_and_weakness_prompt | groq_r1_llama | missing_domain_parser
-    
-    missing_analysis = chain.invoke({"strengths": state["scores"]["strength"], "development_area": state["scores"]["development_area"], "analysis": state["analysis"], })
-    # Extract count of missing items (you'll need to implement this)
+    missing = chain.invoke({
+        "strengths": state["scores"]["strength"],
+        "development_area": state["scores"]["development_area"],
+        "analysis": state["analysis"]
+    })
+    exceeds = len(missing.missing_strengths) > 4 or len(missing.missing_weaknesses) > 4
+    missing_count = len(missing.missing_strengths) + len(missing.missing_weaknesses)
+    return {"missing_count": missing_count, "exceeds_threshold": exceeds}
 
-    exceeds_threshold = check_missing_count(missing_analysis)
-    print("check_missing_count_agent")
-    return {"exceeds_threshold": exceeds_threshold}
+async def judge_analysis(state: AnalysisState, session_id: str) -> AnalysisState:
+    await update_progress(session_id, "judge_analysis", "Evaluating analysis quality…", 50, state["name"])
+    chain = judge_llm_prompt | llama_70b_together_free | StrOutputParser()
+    judgment = chain.invoke({"analysis": state["analysis"]})
+    return {"is_acceptable": "acceptable" in judgment.lower()}
 
-
-
-def correlated_domain_analysis(state: AnalysisState) -> AnalysisState:
-    """Analyze correlated domains"""
-    
+async def correlated_domain_analysis(state: AnalysisState, session_id: str) -> AnalysisState:
+    await update_progress(session_id, "correlated_analysis", "Analyzing correlated domains…", 65, state["name"] )
     chain = corelated_domain_together_prompt | groq_r1_llama | ThinkTagParser()
-    
-    correlation_analysis = chain.invoke({
+    corr = chain.invoke({
         "analysis": state["analysis"],
         "correlated_domains": correlated_domains
     })
-    print("correlation_analysis agent")
-    
-    return {"final_output": correlation_analysis}
+    return {"final_output": corr}
 
+async def check_bias_and_desirability(state: AnalysisState, session_id: str) -> AnalysisState:
+    await update_progress(session_id, "check_bias", "Checking for bias/desirability…", 80, state["name"])
+    out = state["final_output"]
+    if state["metadata"]["response_bias"]:
+        out += "\n\nNote: response bias detected."
+    if state["metadata"]["social_desirable"]:
+        out += "\n\nNote: possible social desirability."
+    return {"final_output": out}
 
-
-def check_bias_and_desirability(state: AnalysisState) -> AnalysisState:
-    """Add bias and desirability warnings to analysis if needed"""
-    final_analysis = state["final_output"]
-    print("biasness_agent")
-
-    
-    # Check if either bias or desirability is present
-    if state["metadata"]["response_bias"] or state["metadata"]["social_desirable"]:
-        
-        warning = "\n\nNote: "
-        if state["metadata"]["response_bias"]:
-            warning += "The individual seems to have taken the test cautiously, possibly to conceal certain aspects of himself/herself. Further assessment during the interview is recommended."
-        if state["metadata"]["social_desirable"]:
-            warning += " There are no apparent areas of weakness in his profile. The individual needs to be assessed for social desirability during the interview. "
-        
-        
-        final_analysis += warning
-    
-    return {"final_output": final_analysis}
-
-
-
-def judge_analysis(state: AnalysisState) -> AnalysisState:
-    """Judge the quality of the analysis"""
-    prompt = judge_llm_prompt
-    chain = prompt | llama_70b_together_free | StrOutputParser()
-    print("judge_analysis_agent")
-    
-    # Judge the current analysis
-    judgment = chain.invoke({
-        "analysis": state["analysis"],
-    })
-    
-    # Convert judgment to boolean (you might need to adjust this based on your prompt)
-    is_acceptable = "acceptable" in judgment.lower()
-    
-    return {"is_acceptable": is_acceptable}
-
-def item_analysis(state: AnalysisState) -> AnalysisState:
-    """Perform item-level analysis"""
-    
+async def item_analysis(state: AnalysisState, session_id: str) -> AnalysisState:
+    await update_progress(session_id, "item_analysis", "Performing item-level analysis…", 95, state["name"])
     chain = item_analysis_2_prompt | llama_70b_together_free | StrOutputParser()
-    print("item_analysis_agent")
-    
-    # Perform item analysis
-    item_analysis_result = chain.invoke({
-        "strength": state["scores"]["strength"], 
+    items = chain.invoke({
+        "strength": state["scores"]["strength"],
         "development_area": state["scores"]["development_area"],
-        "user_data": state["items"],
+        "user_data": state["items"]
     })
-    
-    return {"item_analysis": item_analysis_result}
+    return {"item_analysis": items}
 
-def format_analysis(state: AnalysisState) -> AnalysisState:
-    """Format the final output and item analysis using LLM"""
-    
+async def format_analysis(state: AnalysisState, session_id: str) -> AnalysisState:
+    await update_progress(session_id, "formatting", "Formatting final output…", 95, state["name"])
     chain = format_text_prompt | llama_70b_together_free | StrOutputParser()
-    print("format_analysis_agent")
-    
-    # Perform formatting on both final_output and item_analysis
-    formatted_final_output = chain.invoke({"analysis": state["final_output"]})
-    formatted_item_analysis = chain.invoke({"analysis": state["item_analysis"]})
-    
-    # Update the state with formatted text
-    state["final_output"] = formatted_final_output
-    state["item_analysis"] = formatted_item_analysis
-    
+    state["final_output"] = chain.invoke({"analysis": state["final_output"]})
+    state["item_analysis"] = chain.invoke({"analysis": state["item_analysis"]})
     return state
 
+# Async wrappers for StateGraph nodes
+async def run_psychometric(state: AnalysisState):
+    return await psychometric_analysis(state, current_session_id)
 
-# Define the workflow
+async def run_check_missing(state: AnalysisState):
+    return await check_missing_analysis(state, current_session_id)
+
+async def run_judge(state: AnalysisState):
+    return await judge_analysis(state, current_session_id)
+
+async def run_correlated(state: AnalysisState):
+    return await correlated_domain_analysis(state, current_session_id)
+
+async def run_bias(state: AnalysisState):
+    return await check_bias_and_desirability(state, current_session_id)
+
+async def run_item_analysis(state: AnalysisState):
+    return await item_analysis(state, current_session_id)
+
+async def run_format(state: AnalysisState):
+    return await format_analysis(state, current_session_id)
+
+# Build the workflow graph
 workflow = StateGraph(AnalysisState)
+workflow.add_node("psychometric_analysis", run_psychometric)
+workflow.add_node("check_missing", run_check_missing)
+workflow.add_node("judge_analysis", run_judge)
+workflow.add_node("correlated_analysis", run_correlated)
+workflow.add_node("check_bias", run_bias)
+workflow.add_node("item_analysis_node", run_item_analysis)
+workflow.add_node("format_analysis", run_format)
 
-# Add nodes
-workflow.add_node("psychometric_analysis", psychometric_analysis)
-workflow.add_node("check_missing", check_missing_analysis)
-workflow.add_node("judge_analysis", judge_analysis)
-workflow.add_node("correlated_analysis", correlated_domain_analysis)
-workflow.add_node("check_bias", check_bias_and_desirability)
-workflow.add_node("item_analysis_node", item_analysis)
-#workflow.add_node("format_analysis", format_analysis)
-
-# Add edges
+# Define edges and transitions
 workflow.add_edge("psychometric_analysis", "check_missing")
 workflow.add_conditional_edges(
     "check_missing",
-    lambda x: "psychometric_analysis" if x["exceeds_threshold"] else "judge_analysis",
-    {
-        "psychometric_analysis": "psychometric_analysis",
-        "judge_analysis": "judge_analysis"
-    }
+    lambda out: "psychometric_analysis" if out.get("exceeds_threshold") else "judge_analysis",
+    {"psychometric_analysis": "psychometric_analysis", "judge_analysis": "judge_analysis"}
 )
-
 workflow.add_conditional_edges(
     "judge_analysis",
-    lambda x: "psychometric_analysis" if not x["is_acceptable"] else "correlated_analysis",
-    {
-        "psychometric_analysis": "psychometric_analysis",
-        "correlated_analysis": "correlated_analysis"
-    }
+    lambda out: "psychometric_analysis" if not out.get("is_acceptable") else "correlated_analysis",
+    {"psychometric_analysis": "psychometric_analysis", "correlated_analysis": "correlated_analysis"}
 )
-
 workflow.add_edge("correlated_analysis", "check_bias")
 workflow.add_edge("check_bias", "item_analysis_node")
 workflow.add_edge("item_analysis_node", END)
 #workflow.add_edge("format_analysis", END)
-
-# Set entry point
 workflow.set_entry_point("psychometric_analysis")
-
-# Compile the graph
 app = workflow.compile()
 
-# Usage
-def analyze_psychometric_scores(agent_input: dict) -> str:
-    # Ensure the keys exist
-    if "scores" not in agent_input or "items" not in agent_input or "metadata" not in agent_input:
-        raise ValueError("Missing 'scores', 'items', or 'metadata' in agent_input")
+# Main analyze function
+async def analyze_psychometric_scores(input_data: dict, session_id: str):
+    global current_session_id
+    current_session_id = session_id
 
-    # Continue with the analysis
-    result = app.invoke(agent_input)  # Pass the entire agent_input
-    # Combine both analyses
-    combined_analysis = {
+    await update_progress(session_id, "start", "Starting analysis…", 0, input_data["name"])
+    await asyncio.sleep(1)
+    result = await app.ainvoke(input_data)
+    await asyncio.sleep(1)
+    await update_progress(session_id, "complete", "Analysis complete!", 100, input_data["name"])
+
+    return {
         "Psychometric Analysis": result["final_output"],
-        "Item Analysis": result["item_analysis"]
+        "Item Analysis": result["item_analysis"],
     }
-    
-    return combined_analysis
 
