@@ -1,8 +1,15 @@
+# Ignore Qodo metadata
 .qodo
-- # Node modules & build
-- frontend/node_modules/
-- frontend/build/
-+ # Node modules & build for our frontend folder
-+ psychometric-frontend/node_modules/
-+ psychometric-frontend/build/
 
+# Node modules & build for our frontend folder
+psychometric-frontend/node_modules/
+psychometric-frontend/build/
+
+# Ignore the certificate_files directory
+certificate_files/
+
+# Ignore the .env file in the backend app
+psychometric_analysis/psychometric-backend/app/.env
+
+# Ignore the .env file in the frontend app
+psychometric_analysis/psychometric-frontend/.env
