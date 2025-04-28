@@ -13,3 +13,6 @@ psychometric_analysis/psychometric-backend/app/.env
 
 # Ignore the .env file in the frontend app
 psychometric_analysis/psychometric-frontend/.env
+
+# environement variable
+psyanalysis
